@@ -2,13 +2,13 @@
 # test_pegelabfrage.py
 #
 # Test-Harness für pegelabfrage.py:
-# - mockt HLNUG index.json Abruf
+# - mockt HLNUG layers/10/index.json Abruf
 # - erzeugt temporäre Config + DB
-# - ruft load_settings() und check_once() direkt aus dem Hauptmodul auf
+# - ruft load_settings() und check_once() aus dem Hauptmodul auf
 #
 # Usage:
 #   python .\test_pegelabfrage.py
-#   python .\test_pegelabfrage.py --main .\pegelabfrage.py
+#   python .\test_pegelabfrage.py --main .\Pegelabfrage.py
 #   python .\test_pegelabfrage.py --align-check
 
 import argparse
@@ -17,6 +17,8 @@ import importlib.util
 import io
 import sys
 import tempfile
+import time
+import gc
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -46,11 +48,7 @@ def load_main_module(main_path: Path):
 
 
 def make_index_payload() -> List[Dict[str, Any]]:
-    """
-    Simuliert HLNUG layers/10/index.json
-    (nur Felder, die unsere Scripts typischerweise verwenden).
-    Passe Werte/Stationen bei Bedarf an.
-    """
+    """Simuliert HLNUG layers/10/index.json."""
     return [
         {
             "station_id": 41806,
@@ -59,7 +57,7 @@ def make_index_payload() -> List[Dict[str, Any]]:
             "stationparameter_name": "W",
             "ts_unitsymbol": "cm",
             "timestamp": "2026-02-25T05:45:00+01:00",
-            "ts_value": 110.0,  # OK (unter erster Schwelle)
+            "ts_value": 110.0,
         },
         {
             "station_id": 41801,
@@ -68,19 +66,25 @@ def make_index_payload() -> List[Dict[str, Any]]:
             "stationparameter_name": "W",
             "ts_unitsymbol": "cm",
             "timestamp": "2026-02-25T13:30:00+01:00",
-            "ts_value": 95.0,  # über 4. Schwelle -> höchste Stufe (wenn thresholds passen)
+            "ts_value": 95.0,
         },
     ]
 
 
 def write_temp_config(cfg_path: Path, db_path: Path) -> None:
     """
-    Temporäre Config für den Test.
-    Wichtig: email.enabled=false, damit keine Mails rausgehen.
+    Temp-Config für den Test.
+    Wichtig:
+    - email.enabled=false (keine Mails)
+    - [threshold].thresholds_cm ist gesetzt (dein Hauptscript verlangt das).
     """
     cfg = f"""\
+[threshold]
+thresholds_cm = 150,180,200,220
+level_names = OK,Stufe1,Stufe2,Stufe3
+
 [storage]
-db_path = {db_path.as_posix()}
+db_path = {str(db_path)}
 
 [runtime]
 mode = once
@@ -105,7 +109,6 @@ use_starttls = false
 [debug]
 enabled = false
 
-; --- 2 Teststationen (4 Stufen) ---
 [station:Unter-Schmitten - Nidda]
 station_id_public = 41806
 station_no = 24810600
@@ -125,7 +128,7 @@ level_names = OK,Stufe1,Stufe2,Stufe3
 
 def patch_requests(main_mod, payload: Any, index_url: str):
     """
-    Patcht requests.Session.get (+ optional requests.get) im Hauptmodul,
+    Patcht requests.Session.get (+ requests.get) im Hauptmodul,
     damit kein echter HTTP Call passiert.
     """
     if not hasattr(main_mod, "requests"):
@@ -140,10 +143,8 @@ def patch_requests(main_mod, payload: Any, index_url: str):
                 return FakeResponse(200, payload)
             return FakeResponse(404, {"error": f"Unexpected URL in test harness: {u}"})
 
-    # Patch Session
     main_mod.requests.Session = PatchedSession
 
-    # Patch requests.get, falls dein Hauptscript das direkt nutzt
     def patched_get(url, *args, **kwargs):
         u = str(url)
         if u == index_url or u.endswith("/layers/10/index.json"):
@@ -154,18 +155,24 @@ def patch_requests(main_mod, payload: Any, index_url: str):
 
 
 def alignment_check(output: str) -> None:
-    """
-    Optional: prüft, ob 'Pegel:' in allen Zeilen an derselben Stelle startet.
-    Das funktioniert nur, wenn dein Hauptscript pro Station genau eine Zeile druckt.
-    """
+    """Optional: prüft, ob 'Pegel:' in allen Zeilen an derselben Stelle startet."""
     lines = [ln for ln in output.splitlines() if ln.strip()]
-    pegel_positions = []
-    for ln in lines:
-        idx = ln.find("Pegel:")
-        if idx >= 0:
-            pegel_positions.append(idx)
-    if len(pegel_positions) >= 2 and len(set(pegel_positions)) != 1:
-        raise AssertionError(f"Alignment-Check fehlgeschlagen: Pegel: Positionen = {pegel_positions}")
+    positions = [ln.find("Pegel:") for ln in lines if "Pegel:" in ln]
+    if len(positions) >= 2 and len(set(positions)) != 1:
+        raise AssertionError(f"Alignment-Check fehlgeschlagen: Pegel:-Positionen = {positions}")
+
+
+def resolve_main_path(p: str) -> Path:
+    # robust gegen Groß/Kleinschreibung und Standardname
+    cand = Path(p)
+    if cand.exists():
+        return cand.resolve()
+    # typische Varianten
+    for alt in ("pegelabfrage.py", "Pegelabfrage.py"):
+        a = Path(alt)
+        if a.exists():
+            return a.resolve()
+    return cand.resolve()  # wird später als nicht vorhanden gemeldet
 
 
 def main():
@@ -174,13 +181,12 @@ def main():
     ap.add_argument("--align-check", action="store_true", help="prüft Spalten-Ausrichtung (Pegel:)")
     args = ap.parse_args()
 
-    main_path = Path(args.main).resolve()
+    main_path = resolve_main_path(args.main)
     if not main_path.exists():
         raise SystemExit(f"Hauptscript nicht gefunden: {main_path}")
 
     main_mod = load_main_module(main_path)
 
-    # Erwartete API prüfen
     for fn in ("load_settings", "check_once"):
         if not hasattr(main_mod, fn):
             raise SystemExit(
@@ -188,20 +194,21 @@ def main():
                 "Bitte stelle sicher, dass load_settings() und check_once() existieren."
             )
 
-    # Index-URL aus dem Hauptmodul übernehmen (falls dort definiert)
-    index_url = getattr(main_mod, "HLNUG_LASTVALUES_INDEX", "https://www.hlnug.de/static/pegel/wiskiweb3/data/internet/layers/10/index.json")
+    index_url = getattr(
+        main_mod,
+        "HLNUG_LASTVALUES_INDEX",
+        "https://www.hlnug.de/static/pegel/wiskiweb3/data/internet/layers/10/index.json",
+    )
 
-    with tempfile.TemporaryDirectory() as td:
+    # Wichtig: ignore_cleanup_errors=True verhindert WinError 32 beim Löschen (Windows DB-Lock)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         td_path = Path(td)
         cfg_path = td_path / "config.ini"
         db_path = td_path / "pegel_test.db"
 
         write_temp_config(cfg_path, db_path)
-
-        # Patch HTTP
         patch_requests(main_mod, make_index_payload(), index_url)
 
-        # Laden + ausführen
         settings = main_mod.load_settings(cfg_path)
 
         buf = io.StringIO()
@@ -210,9 +217,11 @@ def main():
 
         out = buf.getvalue()
 
-        # Minimalchecks: beide Stationen müssen erscheinen
-        assert "Unter-Schmitten" in out, "Erwartete Ausgabe für Unter-Schmitten fehlt"
-        assert "Ulfa" in out, "Erwartete Ausgabe für Ulfa fehlt"
+        # Minimalchecks
+        if "Unter-Schmitten" not in out:
+            raise AssertionError("Erwartete Ausgabe für Unter-Schmitten fehlt")
+        if "Ulfa" not in out:
+            raise AssertionError("Erwartete Ausgabe für Ulfa fehlt")
 
         if args.align_check:
             alignment_check(out)
@@ -224,6 +233,11 @@ def main():
         print(f"Return-Code: {rc}")
         print(f"Temp-Config: {cfg_path}")
         print(f"Temp-DB:     {db_path}")
+
+        # Best-effort: versuchen, Locks zu lösen (optional)
+        del settings
+        gc.collect()
+        time.sleep(0.1)
 
 
 if __name__ == "__main__":
