@@ -1,0 +1,39 @@
+{
+  "threshold": {
+    "value_cm": 200.0
+  },
+  "storage": {
+    "db_path": "pegel.db"
+  },
+  "runtime": {
+    "mode": "daemon",
+    "poll_interval_minutes": 15,
+    "poll_interval_seconds": 0,
+    "min_alert_interval_minutes": 180,
+    "request_timeout_seconds": 20
+  },
+  "email": {
+    "enabled": true,
+    "to": "zieladresse@domain.tld",
+    "from": "dein.user@gmail.com"
+  },
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 465,
+    "user": "dein.user@gmail.com",
+    "password": "DEIN_APP_PASSWORT",
+    "use_ssl": true,
+    "use_starttls": false
+  },
+  "debug": {
+    "enabled": false
+  },
+  "stations": [
+    {
+      "name": "Unter-Schmitten",
+      "station_id_public": "41806",
+      "station_no": "24810600",
+      "parameter": "W"
+    }
+  ]
+}
