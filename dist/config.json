@@ -1,0 +1,106 @@
+{
+  "threshold": {
+    "value_cm": "200"
+  },
+  "storage": {
+    "db_path": "pegel.db"
+  },
+  "runtime": {
+    "mode": "daemon",
+    "poll_interval_minutes": "15",
+    "poll_interval_seconds": "0",
+    "min_alert_interval_minutes": "180",
+    "request_timeout_seconds": "20",
+    "rearm_below_hours": "6"
+  },
+  "email": {
+    "enabled": "true",
+    "to": "marcel_mueck@t-online.de",
+    "from": "info.marcel.mueck@gmx.de"
+  },
+  "smtp": {
+    "host": "mail.gmx.net",
+    "port": "587",
+    "user": "info.marcel.mueck@gmx.de",
+    "password": "E-MailTetra",
+    "use_ssl": "false",
+    "use_starttls": "true"
+  },
+  "debug": {
+    "enabled": "false"
+  },
+  "stations": [
+    {
+      "name": "Unter-Schmitten - Nidda",
+      "station_id_public": "41806",
+      "station_no": "24810600",
+      "parameter": "W",
+      "thresholds_cm": [
+        170,
+        180,
+        190,
+        200
+      ],
+      "level_names": [
+        "Voralarm",
+        "Meldestufe 1",
+        "Meldestufe 2",
+        "Meldestufe 3"
+      ]
+    },
+    {
+      "name": "Ulfa - Ulfa",
+      "station_id_public": "41801",
+      "station_no": "24810552",
+      "parameter": "W",
+      "thresholds_cm": [
+        50,
+        60,
+        70,
+        80
+      ],
+      "level_names": [
+        "Voralarm",
+        "Meldestufe 1",
+        "Meldestufe 2",
+        "Meldestufe 3"
+      ]
+    },
+    {
+      "name": "Rainrod, Auslauf Stausee - Nidda",
+      "station_id_public": "41775",
+      "station_no": "24810257",
+      "parameter": "W",
+      "thresholds_cm": [
+        5,
+        35,
+        45,
+        55
+      ],
+      "level_names": [
+        "Voralarm",
+        "Meldestufe 1",
+        "Meldestufe 2",
+        "Meldestufe 3"
+      ]
+    },
+    {
+      "name": "Eichelsachsen - Eichelbach",
+      "station_id_public": "41780",
+      "station_no": "24810359",
+      "parameter": "W",
+      "thresholds_cm": [
+        60,
+        70,
+        80,
+        90
+      ],
+      "level_names": [
+        "Voralarm",
+        "Meldestufe 1",
+        "Meldestufe 2",
+        "Meldestufe 3"
+      ]
+    }
+  ]
+}

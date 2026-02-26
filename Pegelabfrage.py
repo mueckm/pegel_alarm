@@ -55,6 +55,8 @@ class Settings:
     min_alert_interval_minutes: int
     request_timeout_seconds: int
 
+    rearm_below_hours: float  # Stunden unterhalb Schwelle, bevor erneuter Alarm für dieselbe Meldestufe möglich ist
+
     email_enabled: bool
     mail_to: str
     mail_from: str
@@ -230,8 +232,14 @@ def load_settings(config_path: Path) -> Settings:
     global_level_names = _parse_level_names_for_section(threshold_sec, "threshold", fallback=global_level_names, n_levels=len(fallback_thresholds))
 
     # Stationen: bevorzugt cfg['stations'] als Liste
+    # Zusätzlich unterstützt: 1:1-INI->JSON Mapping mit Top-Level Keys "station:<Name>".
     stations: List[StationConfig] = []
     stations_raw = cfg.get("stations")
+
+    station_sections: List[Tuple[str, Dict[str, Any]]] = []
+    for k, v in cfg.items():
+        if isinstance(k, str) and k.lower().startswith("station:") and isinstance(v, dict):
+            station_sections.append((k, v))
 
     if isinstance(stations_raw, list) and stations_raw:
         for i, st in enumerate(stations_raw, start=1):
@@ -244,6 +252,37 @@ def load_settings(config_path: Path) -> Settings:
 
             if not station_no:
                 raise ValueError(f"stations[{i}] ({name}): station_no fehlt")
+
+            thresholds = _parse_thresholds_for_section(st, name, fallback_thresholds)
+            for j in range(1, len(thresholds)):
+                if not (thresholds[j-1] < thresholds[j]):
+                    raise ValueError(f"{name}: thresholds müssen strikt aufsteigend sein")
+            if min(thresholds) <= 0:
+                raise ValueError(f"{name}: thresholds müssen > 0 sein")
+
+            level_names = _parse_level_names_for_section(st, name, fallback=global_level_names, n_levels=len(thresholds))
+
+            stations.append(
+                StationConfig(
+                    name=name,
+                    station_id_public=station_id_public,
+                    station_no=station_no,
+                    parameter=parameter,
+                    thresholds_cm=thresholds,
+                    level_names=level_names,
+                )
+            )
+    elif station_sections:
+        # 1:1: station:<Name> Sections
+        for sec_name, st in station_sections:
+            header_name = sec_name.split(":", 1)[1].strip() if ":" in sec_name else sec_name
+            name = str(st.get("name") or header_name).strip() or header_name
+            station_id_public = str(st.get("station_id_public") or st.get("station_id") or "").strip()
+            station_no = str(st.get("station_no") or "").strip()
+            parameter = str(st.get("parameter") or "W").strip()
+
+            if not station_no:
+                raise ValueError(f"{sec_name}: station_no fehlt")
 
             thresholds = _parse_thresholds_for_section(st, name, fallback_thresholds)
             for j in range(1, len(thresholds)):
@@ -311,6 +350,8 @@ def load_settings(config_path: Path) -> Settings:
     min_alert_interval_minutes = int(runtime.get("min_alert_interval_minutes") or 180)
     request_timeout_seconds = int(runtime.get("request_timeout_seconds") or 20)
 
+    rearm_below_hours = float(runtime.get("rearm_below_hours") or 6)
+
     alert_on_start = _as_bool(runtime.get("alert_on_start"), True)
     alert_on_level_increase = _as_bool(runtime.get("alert_on_level_increase"), True)
 
@@ -355,6 +396,7 @@ def load_settings(config_path: Path) -> Settings:
         poll_interval_seconds=poll_interval_seconds,
         min_alert_interval_minutes=int(min_alert_interval_minutes),
         request_timeout_seconds=int(request_timeout_seconds),
+        rearm_below_hours=float(rearm_below_hours),
         email_enabled=bool(email_enabled),
         mail_to=mail_to,
         mail_from=mail_from,
@@ -652,69 +694,81 @@ def check_once(settings: Settings) -> int:
                         unit,
                     ),
                 )
-
-                # State keys (pro Station/Parameter)
-                key_alert_ts = f"last_alert_ts:{station.station_no}:{station.parameter}"
+                # State (pro Station/Parameter/Schwelle):
+                # - E-Mail beim Erreichen/Überschreiten jeder Schwelle (Flanke).
+                # - Wiederholung für dieselbe Schwelle erst, wenn der Pegel mindestens rearm_below_hours
+                #   am Stück unterhalb dieser Schwelle war und danach erneut überschreitet.
                 key_last_level = f"last_level:{station.station_no}:{station.parameter}"
 
-                last_alert_ts = db_get_state(con, key_alert_ts)
-                last_alert_dt = _to_dt(last_alert_ts) if last_alert_ts else None
+                for th_idx, th in enumerate(station.thresholds_cm):
+                    level_name = station.level_names[th_idx] if th_idx < len(station.level_names) else f"Meldestufe {th_idx + 1}"
+                    key_armed = f"armed:{station.station_no}:{station.parameter}:{th_idx}"
+                    key_below_since = f"below_since:{station.station_no}:{station.parameter}:{th_idx}"
 
-                last_level_str = db_get_state(con, key_last_level)
-                last_level = _parse_int_or_none(last_level_str)
+                    armed_str = db_get_state(con, key_armed)
+                    armed = True
+                    if armed_str is not None and str(armed_str).strip() != "":
+                        armed = str(armed_str).strip().lower() in ("1", "true", "yes", "y", "on")
 
-                # Alarm-Entscheidung:
-                # - Warnstufe muss >=1 sein
-                # - optional: nur bei Stufenanstieg
-                # - zusätzlich Rate-Limit in Minuten (für gleiche Stufe / Wiederholungen)
-                should_alert = level >= 1
+                    below_since_str = db_get_state(con, key_below_since)
+                    below_since_dt = _to_dt(below_since_str) if below_since_str else None
 
-                if should_alert and settings.alert_on_level_increase and last_level is not None:
-                    if level <= last_level:
-                        should_alert = False
+                    # Unterhalb der Schwelle: ggf. Re-Arm nach Ablauf der Zeit
+                    if value < th:
+                        if not armed:
+                            if below_since_dt is None:
+                                db_set_state(con, key_below_since, dt.isoformat())
+                            else:
+                                if (dt - below_since_dt).total_seconds() >= settings.rearm_below_hours * 3600:
+                                    db_set_state(con, key_armed, "1")
+                                    db_set_state(con, key_below_since, "")
+                        else:
+                            # aufgeräumt halten
+                            if below_since_str:
+                                db_set_state(con, key_below_since, "")
+                        continue
 
-                # Erstlauf ohne last_level: optional
-                if should_alert and last_level is None and not settings.alert_on_start:
-                    should_alert = False
+                    # Ab hier: value >= th  (oberhalb der Schwelle)
+                    if below_since_str:
+                        # Nicht mehr kontinuierlich unterhalb
+                        db_set_state(con, key_below_since, "")
 
-                # Rate-Limit
-                if should_alert and last_alert_dt is not None:
-                    delta_min = (now - last_alert_dt).total_seconds() / 60.0
-                    if delta_min < settings.min_alert_interval_minutes:
-                        # wenn Stufenanstieg aktiv ist, darf ein echter Anstieg trotzdem durch
-                        if not (settings.alert_on_level_increase and last_level is not None and level > last_level):
-                            should_alert = False
+                    if not armed:
+                        continue
 
-                if should_alert:
+                    # Erstlauf-Unterdrückung (optional)
+                    if armed_str is None and not settings.alert_on_start:
+                        db_set_state(con, key_armed, "0")
+                        continue
+
+                    # E-Mail bei Schwellen-Erreichen
                     if _email_config_ok(settings):
-                        level_name = station.level_names[level - 1] if (level - 1) < len(station.level_names) else f"Warnstufe {level}"
-                        thresholds = station.thresholds_cm
-                        current_threshold = thresholds[level - 1]
-
-                        subject = f"WARNSTUFE {level} {station.name}: {value:.1f}{unit_disp} (>= {current_threshold:.1f}{unit_disp})"
+                        subject = f"{level_name} {station.name}: {value:.1f}{unit_disp} (>= {th:.1f}{unit_disp})"
                         body = (
-                            f"Pegel-Warnung (HLNUG / WISKI-Web)\n\n"
+                            f"Pegel-Meldung (HLNUG-Messdaten)\n\n"
                             f"Station: {station.name}\n"
-                            f"Warnstufe: {level} ({level_name})\n"
+                            f"Meldestufe: {th_idx + 1} ({level_name})\n"
+                            f"Schwelle: {th:.1f}{unit_disp}\n"
+                            f"Messwert: {value:.1f}{unit_disp}\n"
+                            f"Zeitpunkt der Messdaten: {time_disp}\n\n"
                             f"Station-ID (Web): {station.station_id_public}\n"
                             f"Station-No (Daten): {station.station_no}\n"
-                            f"Parameter: {station.parameter}\n"
-                            f"Messwert: {value:.1f}{unit_disp}\n"
-                            f"Zeit (Berlin): {time_disp}\n"
-                            f"Zeitstempel (Quelle, ISO): {ts_iso}\n\n"
-                            f"Thresholds (cm): {', '.join('{:.1f}'.format(t) for t in thresholds)}\n"
-                            f"Quelle (Endpoint): {source}\n"
+                            f"Quelle: Pegelwarnung via E-Mail V1.0 - © Marcel Mück\n"
                         )
-                        send_email(settings, subject, body)
-                        db_set_state(con, key_alert_ts, now.isoformat())
-                        print(f"WARNMAIL: {station.name} -> an {settings.mail_to} gesendet.")
+                        try:
+                            send_email(settings, subject, body)
+                            print(f"***Pegel-Warnung*** E-Mail gesendet: {station.name} / {level_name}")
+                            # Nach erfolgreichem Versand disarmen, bis Re-Arm-Bedingung erfüllt ist
+                            db_set_state(con, key_armed, "0")
+                        except Exception as e:
+                            print(f"***Pegel-Warnung*** Fehler beim Senden der E-Mail: {e}", file=sys.stderr)
                     else:
                         print(
-                            f"WARNUNG: {station.name} (Warnstufe {level}), aber E-Mail/SMTP-Konfig unvollständig.",
+                            f"WARNUNG: {station.name} ({level_name}), aber E-Mail/SMTP-Konfig unvollständig.",
                             file=sys.stderr,
                         )
 
-                # last_level immer aktualisieren
+                # last_level weiterhin speichern (für Anzeige/Verlauf)
                 db_set_state(con, key_last_level, str(level))
 
             except Exception as e:
