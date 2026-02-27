@@ -2,7 +2,7 @@
 # Pegelabfrage.py (multi-station + 3/4 Warnstufen pro Messstelle, v2.3-json)
 #
 # Identisches Verhalten wie die INI-Version, aber Konfiguration aus JSON-Datei.
-# Erwartete Config-Datei: config.json (oder per --config Pfad angeben)
+# Erwartete Config-Datei: config-pegel.json (oder per --config Pfad angeben)
 
 import argparse
 import json
@@ -315,7 +315,7 @@ def load_settings(config_path: Path) -> Settings:
         parameter = str(st.get("parameter") or "W").strip()
 
         if not station_no:
-            raise ValueError("station.station_no fehlt in config.json")
+            raise ValueError("station.station_no fehlt in config-pegel.json")
 
         thresholds = _parse_thresholds_for_section(st, "station", fallback_thresholds)
         level_names = _parse_level_names_for_section(st, "station", fallback=global_level_names, n_levels=len(thresholds))
@@ -782,7 +782,7 @@ def check_once(settings: Settings) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.json", help="Pfad zur config.json (default: neben EXE/Script)")
+    ap.add_argument("--config", default="config-pegel.json", help="Pfad zur config-pegel.json (default: neben EXE/Script)")
     args = ap.parse_args()
 
     app_dir = get_app_dir()
